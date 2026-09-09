@@ -17,6 +17,11 @@ type StartImportRequest = {
 
 type HistoricalImportRequest = CreateUploadSessionRequest | StartImportRequest;
 
+// Hela importen körs i en enda request: nedladdning, parsning, batchvisa
+// upserts (varje rad passerar fyra BEFORE-triggers) och deduplicering.
+// Utan detta gäller plattformens standardgräns, som en månadsfil spränger.
+export const maxDuration = 300;
+
 
 
 async function handleCreateUploadSession(adminId: string, filename: string) {
@@ -111,9 +116,14 @@ async function handleStartImport(adminId: string, jobId: string) {
       { in_source_file_name: storagePath },
     );
     if (dedupeError) {
+      // Raderna är redan skrivna och committade vid det här laget – varje batch
+      // är en egen transaktion. Meddelandet måste därför säga att datan finns
+      // kvar, annars läser admin det som att hela importen gick förlorad.
       throw new ImportHttpError(
         500,
-        `Import misslyckades vid deduplicering: ${dedupeError.message}`,
+        `Raderna importerades, men dedupliceringen misslyckades: ${dedupeError.message}. `
+        + 'Datan finns i databasen men äldre priser för samma kund, viktklass och '
+        + 'relation ligger kvar. Kör dedupliceringen igen.',
       );
     }
 
@@ -123,8 +133,12 @@ async function handleStartImport(adminId: string, jobId: string) {
         status: 'completed',
         rows_total: result.rowsFound,
         rows_processed: result.rowsFound,
-        rows_valid: result.rowsFound - result.filteredOutRows,
-        rows_failed: result.rowsFound - result.insertedRows - result.filteredOutRows,
+        rows_valid: result.rowsFound - result.filteredOutRows - result.nonPositiveRows,
+        rows_failed:
+          result.rowsFound
+          - result.insertedRows
+          - result.filteredOutRows
+          - result.nonPositiveRows,
         inserted_row_count: result.insertedRows,
         completed_at: new Date().toISOString(),
       })

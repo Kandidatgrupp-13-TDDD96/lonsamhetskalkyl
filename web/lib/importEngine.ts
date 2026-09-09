@@ -49,6 +49,7 @@ export type ImportResult = {
     rowsFound: number;
     insertedRows: number;
     filteredOutRows: number;
+    nonPositiveRows: number;
     paketburRowsUpdated?: number;
 };
 
@@ -340,6 +341,7 @@ export async function processHistoricalCSV(
     const importedAt = new Date().toISOString();
     const totalRows = parsed.rows.length;
     let filteredOutRows = 0;
+    let nonPositiveRows = 0;
 
     // Valideringspass
     for (let i = 0; i < parsed.rows.length; i++) {
@@ -403,6 +405,17 @@ export async function processHistoricalCSV(
             regNumber &&
             weight !== null
         ) {
+            // Makuleringar och nollade rader. Historiken används för att räkna
+            // fram ett kilopris (kundnetto / vikt), och varken en negativ eller
+            // en nollad rad kan ge ett sådant. En rad med vikt 0 skulle dessutom
+            // ge division med noll i steg 1 och slå ut hela kombinationen.
+            // Filtret ligger före viktklassuppslaget, så att negativa vikter
+            // aldrig behöver finnas i vikt_till_viktklass.
+            if (weight <= 0 || netCustomerFreight <= 0) {
+                nonPositiveRows += 1;
+                continue;
+            }
+
             const weightClass = resolveWeightClass(weight, weightClassIntervals);
             if (weightClass === null) {
                 rowErrors.push(`Rad ${rowNumber}: Kunde inte avgöra viktklass för vikt ${weight}.`);
@@ -424,7 +437,7 @@ export async function processHistoricalCSV(
                     }
                 }
 
-                if (relation && kolli && kolli > 0) {
+                if (relation && kolli && kolli > 0 && compExclAddon > 0) {
                     const aPris = roundMoney(compExclAddon / kolli);
                     paketburRowsToUpsert.push({
                         relation: relation,
@@ -553,6 +566,7 @@ export async function processHistoricalCSV(
         rowsFound: parsed.rows.length,
         insertedRows,
         filteredOutRows,
+        nonPositiveRows,
         paketburRowsUpdated: paketburRowsToUpsert.length
     };
 }
